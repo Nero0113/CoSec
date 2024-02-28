@@ -1,3 +1,3 @@
 # egd4security_hardening
 
-**Our code will be released as soon as possible after accepted.**
+**We are in the process of organizing it and will release the source code for reproduction as soon as possible!**
