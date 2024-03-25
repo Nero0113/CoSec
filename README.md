@@ -4,7 +4,7 @@
 
 ## ✨Overview
 
-![framework of our method](/Users/lidong/Desktop/code/egd4security_hardening/figure/frame7.png)
+![framework of our method](/figure/frame7.png)
 
 Code for our paper "On-the-Fly Security Hardening of Code LLMs via Supervised Co-Decoding"
 
