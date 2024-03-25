@@ -15,13 +15,13 @@ The directory structure of this repository is shown as below:
 ```
 .
 |-- data_train_val    # Dataset for training and validation 
-|-- data_eval         # Dataset for evaluation
-|-- results						# Experimental results
-|-- scripts						# Scripts for training and inference
-|-- trained						# Trained LoRA for security.
-|-- transformers			# The source code of transformers version 4.33.0 obtained from the
-											# official website, as well as our proposed security hardening
-											# generation framework.
+|-- data_eval          # Dataset for evaluation
+|-- results	            # Experimental results
+|-- scripts             # Scripts for training and inference
+|-- trained	           # Trained LoRA for security.
+|-- transformers	   # The source code of transformers version 4.33.0 obtained from the
+                           # official website, as well as our proposed security hardening
+                           # generation framework.
 
 ```
 
@@ -35,7 +35,7 @@ You can get our security hardening code here
 .
 |-- transformers
 	|-- generation
-		|-- utils					# You can get our security hardening code here
+		|-- utils                   # You can get our security hardening code here
 ```
 
 ## 🔨 Setup
