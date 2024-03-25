@@ -34,8 +34,8 @@ You can get our security hardening code here
 ```
 .
 |-- transformers
-	|-- generation
-		|-- utils                   # You can get our security hardening code here
+   |-- generation
+      |-- utils                   # You can get our security hardening code here
 ```
 
 ## 🔨 Setup
