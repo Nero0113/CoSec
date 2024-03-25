@@ -1,0 +1,9 @@
+numpy==1.25.2
+PyYAML==6.0.1
+scipy==1.11.2
+torch==2.0.1
+tqdm==4.65.0
+lizard
+diff-match-patch
+tabulate
+libcst
