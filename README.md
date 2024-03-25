@@ -4,7 +4,7 @@
 
 ## ✨Overview
 
-![framework of our method](/figure/frame7.png)
+![framework of our method](figure/frame7.png)
 
 Code for our paper "On-the-Fly Security Hardening of Code LLMs via Supervised Co-Decoding"
 
@@ -25,9 +25,7 @@ The directory structure of this repository is shown as below:
 
 ```
 
-We used the same training and validation data as SVEN. 
-
-[SVEN]: https://github.com/eth-sri/sven
+We used the same training and validation data as [SVEN](https://github.com/eth-sri/sven). 
 
 You can get our security hardening code here
 
