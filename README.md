@@ -31,9 +31,8 @@ You can get our security hardening code here
 
 ```
 .
-|-- transformers
-   |-- generation
-      |-- utils                   # You can get our security hardening code here
+|-- scripts
+   |-- CustomizedGeneration                   # You can get our security hardening code here
 ```
 
 ## 🔨 Setup
@@ -51,4 +50,13 @@ To train a LoRA for security yourself, run:
 ```
 $ python train_lora_sec.py
 ```
+
+## 🚀 Inference
+To generate security-hardened code, run:
+```
+$ python generate.py
+```
+To perform security evaluation and functional correctness evaluation, you can simply replace the follow code in SVEN's code with our 'model.generate_with_experts':
+
+
 

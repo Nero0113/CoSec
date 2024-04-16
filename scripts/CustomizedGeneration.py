@@ -1,6 +1,29 @@
-import warnings
+import argparse
+import copy
+import inspect
+import os
+import time
 
-from transformers.utils import logging, ExplicitEnum
+import warnings
+from typing import Union, List, Optional, Callable
+import torch.distributed as dist
+import torch
+from peft import PeftModel
+from torch import Tensor
+from transformers import CodeGenForCausalLM, AutoTokenizer, LogitsProcessorList, StoppingCriteriaList, GenerationConfig, \
+    PreTrainedModel, set_seed, XGLMForCausalLM, GPTBigCodeForCausalLM, LlamaForCausalLM
+
+from transformers.deepspeed import is_deepspeed_zero3_enabled
+from transformers.generation import validate_stopping_criteria
+from transformers.generation.utils import *
+from torch.nn import functional as F
+
+from transformers.generation.logits_process import *
+
+# from utils import sample, norm_logits, max_fn, _split_model_outputs
+
+logger = logging.get_logger(__name__)
+
 
 
 class GenerationMode(ExplicitEnum):
@@ -21,6 +44,7 @@ class GenerationMode(ExplicitEnum):
     CONSTRAINED_BEAM_SEARCH = "constrained_beam_search"
     GROUP_BEAM_SEARCH = "group_beam_search"
 
+
 class ModelWithExperts:
 
     @classmethod
@@ -37,6 +61,13 @@ class ModelWithExperts:
         model = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         return model
+
+    # def init_experts(self, sec, vul, strength=0.5, temp=1.0):
+    #
+    #     self.sec = sec
+    #     self.vul = vul
+    #     self.strength = strength
+    #     self.temp = temp
 
     def _maybe_initialize_input_ids_for_generation(
             self,
@@ -207,6 +238,7 @@ class ModelWithExperts:
                     )
         default_list.extend(custom_list)
         return default_list
+
 
     def _get_logits_processor(
             self,
@@ -522,12 +554,6 @@ class ModelWithExperts:
                 and gamma is None
                 and random_seed is None
         )
-        is_sample_with_experts_gen_mode = (
-                (generation_config.num_beams == 1)
-                and (generation_config.num_beam_groups == 1)
-                and generation_config.do_sample is True
-                and generation_config.expert is not None
-        )
 
         if generation_config.num_beam_groups > generation_config.num_beams:
             raise ValueError("`num_beam_groups` has to be smaller or equal to `num_beams`")
@@ -569,7 +595,7 @@ class ModelWithExperts:
                 )
 
             # 11. run greedy search
-            return self.greedy_search(
+            return self.greedy_search_with_experts(
                 input_ids,
                 logits_processor=logits_processor,
                 stopping_criteria=stopping_criteria,
@@ -601,3 +627,686 @@ class ModelWithExperts:
                 synced_gpus=synced_gpus,
                 **model_kwargs,
             )
+
+        elif is_sample_gen_mode:
+
+            # if model_kwargs['expert']:
+            #     print('setting the adaptive thresholding')
+            #     relative_top = 0.1 #None
+            # else:
+            #     print('not setting adaptive thresholding')
+            #     relative_top = None
+
+
+            # 11. prepare logits warper
+            logits_warper = self._get_logits_warper(generation_config)
+            expert_generation_config = copy.deepcopy(generation_config)
+            # print(generation_config)
+
+            if model_kwargs['expert']:
+                expert_generation_config.top_k = model_kwargs.pop('expert_top_k', 0)
+                expert_generation_config.top_p = model_kwargs.pop('expert_top_p', 1.0)
+                expert_generation_config.min_prob = model_kwargs.pop('expert_min_prob', 0.0)
+                expert_generation_config.temperature = model_kwargs.pop('expert_temperature', 1.0)
+
+                logits_warper_expert = self._get_logits_warper(
+                    expert_generation_config
+                )
+                # print(logits_warper_expert)
+
+            # 12. expand input_ids with `num_return_sequences` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_return_sequences,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+
+            # 13. run sample
+            return self.sample_with_experts(
+                input_ids,
+                logits_processor=logits_processor,
+                logits_warper=logits_warper,
+                logits_warper_expert=logits_warper_expert,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=generation_config.pad_token_id,
+                eos_token_id=generation_config.eos_token_id,
+                output_scores=generation_config.output_scores,
+                return_dict_in_generate=generation_config.return_dict_in_generate,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif is_beam_gen_mode:
+            if generation_config.num_return_sequences > generation_config.num_beams:
+                raise ValueError("`num_return_sequences` has to be smaller or equal to `num_beams`.")
+
+            if stopping_criteria.max_length is None:
+                raise ValueError("`max_length` needs to be a stopping_criteria for now.")
+
+            # 11. prepare beam search scorer
+            beam_scorer = BeamSearchScorer(
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                max_length=generation_config.max_length,
+            )
+            # 12. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+            # 13. run beam search
+            return self.beam_search(
+                input_ids,
+                beam_scorer,
+                logits_processor=logits_processor,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=generation_config.pad_token_id,
+                eos_token_id=generation_config.eos_token_id,
+                output_scores=generation_config.output_scores,
+                return_dict_in_generate=generation_config.return_dict_in_generate,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif is_beam_sample_gen_mode:
+            # 11. prepare logits warper
+            logits_warper = self._get_logits_warper(generation_config)
+
+            if stopping_criteria.max_length is None:
+                raise ValueError("`max_length` needs to be a stopping_criteria for now.")
+            # 12. prepare beam search scorer
+            beam_scorer = BeamSearchScorer(
+                batch_size=batch_size * generation_config.num_return_sequences,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                max_length=generation_config.max_length,
+            )
+
+            # 13. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams * generation_config.num_return_sequences,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+
+            # 14. run beam sample
+            return self.beam_sample(
+                input_ids,
+                beam_scorer,
+                logits_processor=logits_processor,
+                logits_warper=logits_warper,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=generation_config.pad_token_id,
+                eos_token_id=generation_config.eos_token_id,
+                output_scores=generation_config.output_scores,
+                return_dict_in_generate=generation_config.return_dict_in_generate,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif is_group_beam_gen_mode:
+            if generation_config.num_return_sequences > generation_config.num_beams:
+                raise ValueError("`num_return_sequences` has to be smaller or equal to `num_beams`.")
+
+            if generation_config.num_beams % generation_config.num_beam_groups != 0:
+                raise ValueError("`num_beams` should be divisible by `num_beam_groups` for group beam search.")
+
+            if stopping_criteria.max_length is None:
+                raise ValueError("`max_length` needs to be a stopping_criteria for now.")
+
+            has_default_typical_p = kwargs.get("typical_p") is None and generation_config.typical_p == 1.0
+            if not has_default_typical_p:
+                raise ValueError("Decoder argument `typical_p` is not supported with beam groups.")
+
+            # 11. prepare beam search scorer
+            beam_scorer = BeamSearchScorer(
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                num_beam_groups=generation_config.num_beam_groups,
+                max_length=generation_config.max_length,
+            )
+            # 12. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+            # 13. run beam search
+            return self.group_beam_search(
+                input_ids,
+                beam_scorer,
+                logits_processor=logits_processor,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=generation_config.pad_token_id,
+                eos_token_id=generation_config.eos_token_id,
+                output_scores=generation_config.output_scores,
+                return_dict_in_generate=generation_config.return_dict_in_generate,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif is_constraint_gen_mode:
+            if generation_config.num_return_sequences > generation_config.num_beams:
+                raise ValueError("`num_return_sequences` has to be smaller or equal to `num_beams`.")
+
+            if stopping_criteria.max_length is None:
+                raise ValueError("`max_length` needs to be a stopping_criteria for now.")
+
+            if generation_config.num_beams <= 1:
+                raise ValueError("`num_beams` needs to be greater than 1 for constrained generation.")
+
+            if generation_config.do_sample:
+                raise ValueError("`do_sample` needs to be false for constrained generation.")
+
+            if generation_config.num_beam_groups is not None and generation_config.num_beam_groups > 1:
+                raise ValueError("`num_beam_groups` not supported yet for constrained generation.")
+
+            final_constraints = []
+            if generation_config.constraints is not None:
+                final_constraints = generation_config.constraints
+
+            if generation_config.force_words_ids is not None:
+
+                def typeerror():
+                    raise ValueError(
+                        "`force_words_ids` has to either be a `List[List[List[int]]]` or `List[List[int]]`"
+                        f"of positive integers, but is {generation_config.force_words_ids}."
+                    )
+
+                if (
+                        not isinstance(generation_config.force_words_ids, list)
+                        or len(generation_config.force_words_ids) == 0
+                ):
+                    typeerror()
+
+                for word_ids in generation_config.force_words_ids:
+                    if isinstance(word_ids[0], list):
+                        if not isinstance(word_ids, list) or len(word_ids) == 0:
+                            typeerror()
+                        if any(not isinstance(token_ids, list) for token_ids in word_ids):
+                            typeerror()
+                        if any(
+                                any((not isinstance(token_id, int) or token_id < 0) for token_id in token_ids)
+                                for token_ids in word_ids
+                        ):
+                            typeerror()
+
+                        constraint = DisjunctiveConstraint(word_ids)
+                    else:
+                        if not isinstance(word_ids, list) or len(word_ids) == 0:
+                            typeerror()
+                        if any((not isinstance(token_id, int) or token_id < 0) for token_id in word_ids):
+                            typeerror()
+
+                        constraint = PhrasalConstraint(word_ids)
+                    final_constraints.append(constraint)
+
+            # 11. prepare beam search scorer
+            constrained_beam_scorer = ConstrainedBeamSearchScorer(
+                constraints=final_constraints,
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                max_length=generation_config.max_length,
+            )
+            # 12. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+            # 13. run beam search
+            return self.constrained_beam_search(
+                input_ids,
+                constrained_beam_scorer=constrained_beam_scorer,
+                logits_processor=logits_processor,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=generation_config.pad_token_id,
+                eos_token_id=generation_config.eos_token_id,
+                output_scores=generation_config.output_scores,
+                return_dict_in_generate=generation_config.return_dict_in_generate,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+        elif is_speculative_sample_gen_mode:
+            # 11. prepare logits warper
+            logits_warper = self._get_logits_warper(generation_config)
+
+            # 12. expand input_ids with `num_return_sequences` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_return_sequences,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+
+    def sample_with_experts(
+            self,
+            input_ids: torch.LongTensor,
+            logits_processor: Optional[LogitsProcessorList] = None,
+            stopping_criteria: Optional[StoppingCriteriaList] = None,
+            logits_warper: Optional[LogitsProcessorList] = None,
+            logits_warper_expert: Optional[LogitsProcessorList] = None,
+            max_length: Optional[int] = None,
+            pad_token_id: Optional[int] = None,
+            eos_token_id: Optional[Union[int, List[int]]] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_scores: Optional[bool] = None,
+            return_dict_in_generate: Optional[bool] = None,
+            synced_gpus: Optional[bool] = False,
+            **model_kwargs,
+    ) -> Union[SampleOutput, torch.LongTensor]:
+        # init values
+        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+        if max_length is not None:
+            warnings.warn(
+                "`max_length` is deprecated in this function, use"
+                " `stopping_criteria=StoppingCriteriaList(MaxLengthCriteria(max_length=max_length))` instead.",
+                UserWarning,
+            )
+            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
+        logits_warper = logits_warper if logits_warper is not None else LogitsProcessorList()
+        pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
+        if isinstance(eos_token_id, int):
+            eos_token_id = [eos_token_id]
+        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
+        output_scores = output_scores if output_scores is not None else self.generation_config.output_scores
+        output_attentions = (
+            output_attentions if output_attentions is not None else self.generation_config.output_attentions
+        )
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
+        )
+        return_dict_in_generate = (
+            return_dict_in_generate
+            if return_dict_in_generate is not None
+            else self.generation_config.return_dict_in_generate
+        )
+
+        # init attention / hidden states / scores tuples
+        scores = () if (return_dict_in_generate and output_scores) else None
+        decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
+        cross_attentions = () if (return_dict_in_generate and output_attentions) else None
+        decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+
+        # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
+        if return_dict_in_generate and self.config.is_encoder_decoder:
+            encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
+            encoder_hidden_states = (
+                model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
+            )
+
+        # keep track of which sequences are already finished
+        unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
+        #
+        cur_len = input_ids.shape[-1]
+
+        model_kwargs['expert'] = model_kwargs.get('expert', False)
+        if model_kwargs['expert']:
+            model_kwargs_expert = model_kwargs["model_kwargs_expert"]
+
+        this_peer_finished = False  # used by synced_gpus only
+        # auto-regressive generation
+
+        while True:
+            if synced_gpus:
+                # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
+                # The following logic allows an early break if all peers finished generating their sequence
+                this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_ids.device)
+                # send 0.0 if we finished, 1.0 otherwise
+                dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
+                # did all peers finish? the reduced sum will be 0.0 then
+                if this_peer_finished_flag.item() == 0.0:
+                    break
+
+            # prepare model inputs
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
+            # forward pass to get next token
+            outputs = self(
+                **model_inputs,
+                return_dict=True,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+            if model_kwargs['expert']:
+                #print(model_kwargs_expert)
+                model_inputs_expert =  model_kwargs['expert_lm'].prepare_inputs_for_generation(input_ids, **model_kwargs_expert)
+
+                outputs_expert = model_kwargs['expert_lm'](
+                    **model_inputs_expert,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+
+                next_token_logits_expert = outputs_expert.logits[:, -1, :]
+
+                next_token_logits_expert = logits_warper_expert(input_ids, next_token_logits_expert)
+
+                exp_porbs = F.softmax(next_token_logits_expert, dim=-1)
+
+                temp_token = torch.multinomial(exp_porbs, num_samples=1) #（25，1）
+
+            if synced_gpus and this_peer_finished:
+                cur_len = cur_len + 1
+                continue  # don't waste resources running the code we don't need
+
+            next_token_logits = outputs.logits[:, -1, :]
+
+
+            #pre-process distribution
+            next_token_scores = logits_processor(input_ids, next_token_logits)
+            next_token_scores = logits_warper(input_ids, next_token_scores)
+
+            # Store scores, attentions and hidden_states when required
+            if return_dict_in_generate:
+                if output_scores:
+                    scores += (next_token_scores,)
+                if output_attentions:
+                    decoder_attentions += (
+                        (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
+                    )
+                    if self.config.is_encoder_decoder:
+                        cross_attentions += (outputs.cross_attentions,)
+
+                if output_hidden_states:
+                    decoder_hidden_states += (
+                        (outputs.decoder_hidden_states,)
+                        if self.config.is_encoder_decoder
+                        else (outputs.hidden_states,)
+                    )
+
+            # sample
+            if model_kwargs['expert']:
+                lm_porbs = F.softmax(next_token_logits, dim=-1) #（25，50265）
+                exp_porbs = F.softmax(next_token_logits_expert, dim=-1) #（25，50265）
+                #初始化一个和temp_token一样形状的tensor，元素全-1
+                choose_token = torch.full_like(temp_token, -1, device=input_ids.device)
+                #r = torch.rand(25, device = input_ids.device)
+                r = torch.ones(25, device = input_ids.device)
+                #r每个值乘0.5
+                r = r * model_kwargs['threshold']
+
+                #print((torch.gather(lm_porbs, 1, temp_token) / torch.gather(exp_porbs, 1, temp_token)).shape) #25, 1
+                mask_ac = (r < torch.min(torch.tensor([1], device=input_ids.device), (torch.gather(lm_porbs, 1, temp_token)/torch.gather(exp_porbs, 1, temp_token)).squeeze(1))).unsqueeze(1)
+                choose_token[mask_ac] = temp_token[mask_ac]
+                #其余token按照lm的概率采样
+                temp_lm_token = torch.multinomial(lm_porbs, num_samples=1) #（25，1）
+                choose_token[~mask_ac] = temp_lm_token[~mask_ac]
+
+            next_tokens = choose_token.squeeze(1)
+            #next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+
+            # finished sentences should have their next token be a padding token
+            if eos_token_id is not None:
+                if pad_token_id is None:
+                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
+                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+
+            # update generated ids, model inputs, and length for next step
+            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+            model_kwargs = self._update_model_kwargs_for_generation(
+                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
+            )
+            cur_len = cur_len + 1
+
+            if model_kwargs['expert']:
+                model_kwargs_expert = model_kwargs['expert_lm']._update_model_kwargs_for_generation(
+                    outputs_expert, model_kwargs_expert, is_encoder_decoder=model_kwargs['expert_lm'].config.is_encoder_decoder
+                )
+
+            # if eos_token was found in one sentence, set sentence to finished
+            if eos_token_id_tensor is not None:
+                unfinished_sequences = unfinished_sequences.mul(
+                    next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
+                )
+
+            # stop when each sentence is finished, or if we exceed the maximum length
+            if unfinished_sequences.max() == 0 or stopping_criteria(input_ids, scores):
+                if not synced_gpus:
+                    break
+                else:
+                    this_peer_finished = True
+
+        if return_dict_in_generate:
+            if self.config.is_encoder_decoder:
+                return SampleEncoderDecoderOutput(
+                    sequences=input_ids,
+                    scores=scores,
+                    encoder_attentions=encoder_attentions,
+                    encoder_hidden_states=encoder_hidden_states,
+                    decoder_attentions=decoder_attentions,
+                    cross_attentions=cross_attentions,
+                    decoder_hidden_states=decoder_hidden_states,
+                )
+            else:
+                return SampleDecoderOnlyOutput(
+                    sequences=input_ids,
+                    scores=scores,
+                    attentions=decoder_attentions,
+                    hidden_states=decoder_hidden_states,
+                )
+        else:
+            return input_ids
+
+
+def greedy_search_with_experts(
+        self,
+        input_ids: torch.LongTensor,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_scores: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = None,
+        synced_gpus: Optional[bool] = False,
+        streamer: Optional["BaseStreamer"] = None,
+        **model_kwargs,
+) -> Union[GreedySearchOutput, torch.LongTensor]:
+    # init values
+    logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+    stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+    if max_length is not None:
+        warnings.warn(
+            "`max_length` is deprecated in this function, use"
+            " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
+            UserWarning,
+        )
+        stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
+    pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
+    eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
+    if isinstance(eos_token_id, int):
+        eos_token_id = [eos_token_id]
+    eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
+    output_scores = output_scores if output_scores is not None else self.generation_config.output_scores
+    output_attentions = (
+        output_attentions if output_attentions is not None else self.generation_config.output_attentions
+    )
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
+    )
+    return_dict_in_generate = (
+        return_dict_in_generate
+        if return_dict_in_generate is not None
+        else self.generation_config.return_dict_in_generate
+    )
+
+    # init attention / hidden states / scores tuples
+    scores = () if (return_dict_in_generate and output_scores) else None
+    decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
+    cross_attentions = () if (return_dict_in_generate and output_attentions) else None
+    decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+
+    # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
+    if return_dict_in_generate and self.config.is_encoder_decoder:
+        encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
+        encoder_hidden_states = (
+            model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
+        )
+
+    # keep track of which sequences are already finished
+    unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
+
+    this_peer_finished = False  # used by synced_gpus only
+    while True:
+
+        if synced_gpus:
+            # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
+            # The following logic allows an early break if all peers finished generating their sequence
+            this_peer_finished_flag = torch.tensor(0.0 if this_peer_finished else 1.0).to(input_ids.device)
+            # send 0.0 if we finished, 1.0 otherwise
+            dist.all_reduce(this_peer_finished_flag, op=dist.ReduceOp.SUM)
+            # did all peers finish? the reduced sum will be 0.0 then
+            if this_peer_finished_flag.item() == 0.0:
+                break
+
+        # prepare model inputs
+        model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
+        # forward pass to get next token
+        outputs = self(
+            **model_inputs,
+            return_dict=True,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        if synced_gpus and this_peer_finished:
+            cur_len = cur_len + 1
+            continue  # don't waste resources running the code we don't need
+
+        next_token_logits = outputs.logits[:, -1, :]
+
+        # sec prediction
+        sec_output = self.sec(
+            **model_inputs)
+        sec_next_token_logits = sec_output.logits[:, -1, :]
+
+        # vul prediction
+        vul_output = self.vul(
+            **model_inputs)
+        vul_next_token_logits = vul_output.logits[:, -1, :]
+
+        ensemble_logits = next_token_logits + self.alpha * sec_next_token_logits + (
+                    1 - self.alpha) * vul_next_token_logits
+
+        # pre-process distribution
+        next_tokens_scores = logits_processor(input_ids, ensemble_logits)
+
+        # Store scores, attentions and hidden_states when required
+        if return_dict_in_generate:
+            if output_scores:
+                scores += (next_tokens_scores,)
+            if output_attentions:
+                decoder_attentions += (
+                    (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
+                )
+                if self.config.is_encoder_decoder:
+                    cross_attentions += (outputs.cross_attentions,)
+
+            if output_hidden_states:
+                decoder_hidden_states += (
+                    (outputs.decoder_hidden_states,)
+                    if self.config.is_encoder_decoder
+                    else (outputs.hidden_states,)
+                )
+
+        # argmax
+        next_tokens = torch.argmax(next_tokens_scores, dim=-1)
+
+        # finished sentences should have their next token be a padding token
+        if eos_token_id is not None:
+            if pad_token_id is None:
+                raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
+            next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+
+        # update generated ids, model inputs, and length for next step
+        input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+        if streamer is not None:
+            streamer.put(next_tokens.cpu())
+        model_kwargs = self._update_model_kwargs_for_generation(
+            outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
+        )
+
+        # if eos_token was found in one sentence, set sentence to finished
+        if eos_token_id_tensor is not None:
+            unfinished_sequences = unfinished_sequences.mul(
+                next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
+            )
+
+            # stop when each sentence is finished
+            if unfinished_sequences.max() == 0:
+                this_peer_finished = True
+
+        # stop if we exceed the maximum length
+        if stopping_criteria(input_ids, scores):
+            this_peer_finished = True
+
+        if this_peer_finished and not synced_gpus:
+            break
+
+    if streamer is not None:
+        streamer.end()
+
+    if return_dict_in_generate:
+        if self.config.is_encoder_decoder:
+            return GreedySearchEncoderDecoderOutput(
+                sequences=input_ids,
+                scores=scores,
+                encoder_attentions=encoder_attentions,
+                encoder_hidden_states=encoder_hidden_states,
+                decoder_attentions=decoder_attentions,
+                cross_attentions=cross_attentions,
+                decoder_hidden_states=decoder_hidden_states,
+            )
+        else:
+            return GreedySearchDecoderOnlyOutput(
+                sequences=input_ids,
+                scores=scores,
+                attentions=decoder_attentions,
+                hidden_states=decoder_hidden_states,
+            )
+    else:
+        return input_ids
+
+
+class CodegenModelLM(ModelWithExperts, CodeGenForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+class IncoderModelLM(ModelWithExperts, XGLMForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+class StarcodeModelLM(ModelWithExperts, GPTBigCodeForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+class CodeLlamaModelLM(ModelWithExperts, LlamaForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
