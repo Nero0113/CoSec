@@ -96,21 +96,21 @@ in sec_eval.py
 and
 
 ```
-        for i in range(args.num_samples // args.num_samples_per_gen):
-            set_seed(args)
-            with torch.no_grad():
-                samples = model.generate(
-                    **inputs,
-                    do_sample=True,
-                    num_return_sequences=args.num_samples_per_gen,
-                    temperature=args.temp,
-                    max_new_tokens=args.max_gen_len,
-                    top_p=args.top_p,
-                    pad_token_id=tokenizer.eos_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
-                    **kwargs
-                )
+for i in range(args.num_samples // args.num_samples_per_gen):
+    set_seed(args)
+    with torch.no_grad():
+        samples = model.generate(
+            **inputs,
+            do_sample=True,
+            num_return_sequences=args.num_samples_per_gen,
+            temperature=args.temp,
+            max_new_tokens=args.max_gen_len,
+            top_p=args.top_p,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+            **kwargs
+        )
 ```
 
 in human_eval_gen.py
