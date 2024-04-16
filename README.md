@@ -58,5 +58,59 @@ $ python generate.py
 ```
 To perform security evaluation and functional correctness evaluation, you can simply replace the follow code in SVEN's code with our 'model.generate_with_experts':
 
+```
+class PrefixEvaler(EvalerBase):
+    def __init__(self, args):
+        super().__init__(args)
 
+    def load_model(self):
+        self.tokenizer, self.model, self.input_device = load_model('prefix', self.args.model_dir, False, self.args)
+        self.model.eval()
 
+    def sample(self, file_context, func_context, control, lang):
+        return self.sample_prefix(file_context, func_context, control, lang)
+
+    def sample_prefix(self, file_context, func_context, control, lang):
+        input_src = file_context + func_context
+        input_ids = self.tokenizer(input_src, return_tensors='pt').input_ids.to(self.input_device)
+        input_ids_len = input_ids.shape[1]
+        gen_output = self.model.generate(
+            input_ids,
+            do_sample=True,
+            num_return_sequences=self.args.num_gen,
+            temperature=self.args.temp,
+            max_new_tokens=self.args.max_gen_len,
+            top_p=self.args.top_p,
+            pad_token_id=self.tokenizer.pad_token_id,
+            use_cache=True,
+            control_id=control,
+            # return_dict_in_generate=True,
+            # output_scores=True,
+        )
+        return self.process_completions(input_src, input_ids_len, gen_output, lang)
+
+```
+
+in sec_eval.py
+
+and
+
+```
+        for i in range(args.num_samples // args.num_samples_per_gen):
+            set_seed(args)
+            with torch.no_grad():
+                samples = model.generate(
+                    **inputs,
+                    do_sample=True,
+                    num_return_sequences=args.num_samples_per_gen,
+                    temperature=args.temp,
+                    max_new_tokens=args.max_gen_len,
+                    top_p=args.top_p,
+                    pad_token_id=tokenizer.eos_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                    **kwargs
+                )
+```
+
+in human_eval_gen.py
