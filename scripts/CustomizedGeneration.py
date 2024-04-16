@@ -1043,17 +1043,17 @@ class ModelWithExperts:
             if model_kwargs['expert']:
                 lm_porbs = F.softmax(next_token_logits, dim=-1) #（25，50265）
                 exp_porbs = F.softmax(next_token_logits_expert, dim=-1) #（25，50265）
-                #初始化一个和temp_token一样形状的tensor，元素全-1
+
                 choose_token = torch.full_like(temp_token, -1, device=input_ids.device)
                 #r = torch.rand(25, device = input_ids.device)
                 r = torch.ones(25, device = input_ids.device)
-                #r每个值乘0.5
+
                 r = r * model_kwargs['threshold']
 
                 #print((torch.gather(lm_porbs, 1, temp_token) / torch.gather(exp_porbs, 1, temp_token)).shape) #25, 1
                 mask_ac = (r < torch.min(torch.tensor([1], device=input_ids.device), (torch.gather(lm_porbs, 1, temp_token)/torch.gather(exp_porbs, 1, temp_token)).squeeze(1))).unsqueeze(1)
                 choose_token[mask_ac] = temp_token[mask_ac]
-                #其余token按照lm的概率采样
+
                 temp_lm_token = torch.multinomial(lm_porbs, num_samples=1) #（25，1）
                 choose_token[~mask_ac] = temp_lm_token[~mask_ac]
 
