@@ -6,7 +6,7 @@
 
 ![framework of our method](figure/frame7.png)
 
-Code for our paper "On-the-Fly Security Hardening of Code LLMs via Supervised Co-Decoding"
+Code for our paper "CoSec: On-the-Fly Security Hardening of Code LLMs via Supervised Co-Decoding"
 
 ## Directory Structure
 
