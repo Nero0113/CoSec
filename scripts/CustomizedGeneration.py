@@ -984,6 +984,8 @@ class ModelWithExperts:
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
+            batch_size = model_inputs["input_ids"].shape[0]
+
             # forward pass to get next token
             outputs = self(
                 **model_inputs,
@@ -1046,7 +1048,7 @@ class ModelWithExperts:
 
                 choose_token = torch.full_like(temp_token, -1, device=input_ids.device)
                 #r = torch.rand(25, device = input_ids.device)
-                r = torch.ones(25, device = input_ids.device)
+                r = torch.ones(batch_size, device = input_ids.device)
 
                 r = r * model_kwargs['threshold']
 
