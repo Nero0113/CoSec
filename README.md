@@ -55,7 +55,7 @@ $ python generate.py
 ```
 To perform security evaluation and functional correctness evaluation, you can simply replace the follow code in SVEN's code with our 'model.generate_with_experts':
 
-```
+```python
 class PrefixEvaler(EvalerBase):
     def __init__(self, args):
         super().__init__(args)
@@ -92,7 +92,7 @@ in sec_eval.py
 
 and
 
-```
+```python
 for i in range(args.num_samples // args.num_samples_per_gen):
     set_seed(args)
     with torch.no_grad():
@@ -111,3 +111,5 @@ for i in range(args.num_samples // args.num_samples_per_gen):
 ```
 
 in human_eval_gen.py
+
+**We will provide the LoRA portion of a trained CodeGen security model for illustration purposes.**
