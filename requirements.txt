@@ -3,6 +3,7 @@ PyYAML==6.0.1
 scipy==1.11.2
 torch==2.0.1
 tqdm==4.65.0
+transformers==4.33.0
 lizard
 diff-match-patch
 tabulate
