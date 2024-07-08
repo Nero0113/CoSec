@@ -278,8 +278,8 @@ def main():
 
     args.vul_type = ['cwe-089', 'cwe-125', 'cwe-078', 'cwe-476', 'cwe-416', 'cwe-022', 'cwe-787', 'cwe-079', 'cwe-190']
 
-    train_dataset = LoRA_Dataset(args, tokenizer)
-    val_dataset = LoRA_Dataset(args, tokenizer)
+    train_dataset = LoRA_Dataset(args, tokenizer, train=True)
+    val_dataset = LoRA_Dataset(args, tokenizer, train=False)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,

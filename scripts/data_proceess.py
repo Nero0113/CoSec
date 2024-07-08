@@ -13,21 +13,25 @@ from transformers import AutoTokenizer
 
 class LoRA_Dataset(Dataset):
 
-    def __init__(self, args, tokenizer):
+    def __init__(self, args, tokenizer, train=True):
         self.data = list()
         self.args = args
         self.tokenizer = tokenizer
         self.get_dataset()
+        self.train = train
 
     def get_dataset(self):
         #构建jsonl文件列表
-        data_path = Path(os.path.join(self.args.data_path))
+        if self.train:
+            data_path = Path(os.path.join(self.args.data_path))
+        else:
+            data_path = Path(os.path.join(self.args.val_path))
         jsonl_list = [str(p) for p in data_path.glob('*.jsonl')]
         raw_data = load_dataset('json', data_files=jsonl_list)
         for i, item in enumerate(raw_data['train']):
-            src = item['func_src_before']
-            diffs = item['char_changes']['deleted']
-            data = self.add_data(src, diffs, i, item['file_name'].split('.')[-1])
+            func_src_after = item['func_src_after']
+            diff_added = item['char_changes']['added']
+            data = self.add_data(0, func_src_after, diff_added, i, item['file_name'].split('.')[-1])
             if data is not None:
                 self.data.append(data)
 
