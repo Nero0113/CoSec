@@ -35,7 +35,7 @@ You can get our security hardening code here
 ## 🔨 Setup
 
 ```
-conda create -n code_sec python==3.8
+conda create -n code_sec python==3.10
 conda activate code_sec
 pip install -r requirements.txt
 ```
@@ -112,4 +112,5 @@ for i in range(args.num_samples // args.num_samples_per_gen):
 
 in human_eval_gen.py
 
-**We will provide the LoRA portion of a trained CodeGen security model for illustration purposes.**
+**We provide a trained LoRA plugin for Codegen to replicate our experiments.** You can download it from Google Drive: 
+https://drive.google.com/file/d/14-ZzUP6XNFo-pwd5mgisJHwfpOvgNNgU/view?usp=drive_link
