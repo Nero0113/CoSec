@@ -30,7 +30,6 @@ def parse_args():
     parser.add_argument('--num_train_epochs', type=int, default=8)
     parser.add_argument('--learning_rate', type=float, default=5e-5)
     parser.add_argument('--num_workers_dataloader', type=int, default=1)
-    parser.add_argument('--kl_loss_ratio', type=float, default=2)
     parser.add_argument('--lora_rank', type=int, default=8, help='lora rank')
     parser.add_argument('--lora_alpha', type=int, default=16, help='lora_alpha')
     parser.add_argument('--lora_dropout', type=float, default=0.05, help='lora dropout')
@@ -110,7 +109,7 @@ def do_eval(args, model, ref_model, eval_dataloader, tokenizer):
         kl_loss_ = kl_loss_[shift_weights_ != 0]
         kl_loss_ = kl_loss_.mean()
         kl_loss += kl_loss_
-        kl_loss = kl_loss * args.kl_loss_ratio
+        kl_loss = kl_loss
         return_dict['kl_loss'] = kl_loss.item()
 
         loss = lm_loss + kl_loss
@@ -187,7 +186,7 @@ def train(args, model, ref_model, train_dataloader, val_dataloader, tokenizer):
             kl_loss_ = kl_loss_[shift_weights_ != 0]
             kl_loss_ = kl_loss_.mean()
             kl_loss += kl_loss_
-            kl_loss = kl_loss * args.kl_loss_ratio
+            kl_loss = kl_loss
             return_dict['kl_loss'] = kl_loss.item()
 
             loss = lm_loss + kl_loss
