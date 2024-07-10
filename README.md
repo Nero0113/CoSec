@@ -24,7 +24,7 @@ The directory structure of this repository is shown as below:
 
 We used the same training and validation data as [SVEN](https://github.com/eth-sri/sven). 
 
-You can get our security hardening code here
+You can get our co-decoding code here
 
 ```
 .
@@ -47,6 +47,9 @@ To train a LoRA for security yourself, run:
 ```
 $ python train_lora_sec.py
 ```
+
+**We provide a trained LoRA plugin for Codegen to replicate our experiments.** You can download it from Google Drive: 
+https://drive.google.com/file/d/14-ZzUP6XNFo-pwd5mgisJHwfpOvgNNgU/view?usp=drive_link
 
 ## 🚀 Inference
 To generate security-hardened code, run:
@@ -112,5 +115,5 @@ for i in range(args.num_samples // args.num_samples_per_gen):
 
 in human_eval_gen.py
 
-**We provide a trained LoRA plugin for Codegen to replicate our experiments.** You can download it from Google Drive: 
-https://drive.google.com/file/d/14-ZzUP6XNFo-pwd5mgisJHwfpOvgNNgU/view?usp=drive_link
+## Acknowledgement
+We reused SVEN's evaluation framework code, please see their code repository.
