@@ -1,5 +1,3 @@
-# egd4security_hardening
-
 
 
 ## ✨Overview
