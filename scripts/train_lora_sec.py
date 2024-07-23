@@ -246,8 +246,8 @@ def main():
     ref_model = AutoModelForCausalLM.from_pretrained(args.base_model, device_map='auto', )
     model.resize_token_embeddings(len(tokenizer))
     ref_model.resize_token_embeddings(len(tokenizer))
-    target_modules = ["q_proj", "v_proj"]
-    # target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING['gpt_bigcode']
+    # target_modules = ["q_proj", "v_proj"]
+    target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING['codegen']
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
