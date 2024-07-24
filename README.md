@@ -114,7 +114,7 @@ for i in range(args.num_samples // args.num_samples_per_gen):
 in human_eval_gen.py
 
 ## Acknowledgement
-We reused SVEN's evaluation framework code, please see their code repository.
+We reused SVEN's evaluation framework code, please see their code repository. Sincerely grateful for their excellent work.
 
 If you have any questions, please feel free to contact me.
 
